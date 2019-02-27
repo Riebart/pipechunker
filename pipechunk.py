@@ -25,19 +25,35 @@ class JSONList(object):
             return [args[0]]
 
 
-def handle_chunk(chunk_data, command, chunk_name, dry_run):
+def handle_chunk(chunk_data, command, chunk_name, dry_run, retries):
     if dry_run:
         logger.debug("Would have passed in %d bytes to \"%s\"" %
                      (len(chunk_data), str(command + [chunk_name])))
     else:
-        logger.info("Creating process for chunk %s" % chunk_name)
-        proc = subprocess.Popen(command + [chunk_name], stdin=subprocess.PIPE)
-        proc.stdin.write(chunk_data)
-        proc.stdin.close()
-        logger.info("done")
-        while proc.poll() is None:
-            time.sleep(1)
-        return proc.returncode
+        try_num = 1
+        while try_num <= retries:
+            logger.info("Creating process for chunk %s" % chunk_name)
+            proc = subprocess.Popen(
+                command + [chunk_name], stdin=subprocess.PIPE)
+            proc.stdin.write(chunk_data)
+            proc.stdin.close()
+            logger.info("done")
+            while proc.poll() is None:
+                time.sleep(1)
+            if proc.returncode == 0:
+                break
+            else:
+                logger.warning(
+                    "Error upload chunk %s with returncode %don try %d. Retrying up to %d more times"
+                    % (chunk_name, proc.returncode, try_num,
+                       retries - try_num + 1))
+
+        if proc.returncode != 0:
+            logger.error("Error uploading chunk %s, retries were insufficient."
+                         % chunk_name)
+            sys.exit(proc.returncode)
+        else:
+            return proc.returncode
 
 
 def main(parsed_args):
@@ -61,11 +77,10 @@ def main(parsed_args):
             if len(chunk_data) > 0:
                 logger.info("Creating thread %d" % chunk_num)
                 thread = threading.Thread(
-                    target=lambda cd=chunk_data,
-                                  c=parsed_args.command,
-                                  cn=parsed_args.name + ".%04d" % (chunk_num, ),
-                                  dr=parsed_args.dry_run:
-                                    handle_chunk(cd, c, cn, dr))
+                    target=lambda cd=chunk_data, c=parsed_args.command, cn=
+                    parsed_args.name + ".%04d" % (chunk_num, ), dr=parsed_args.
+                    dry_run, rc=parsed_args.chunk_retry_limit: handle_chunk(
+                        cd, c, cn, dr, rc))
                 logger.info("Starting thread %d" % chunk_num)
                 thread.start()
                 threads.append(thread)
@@ -83,6 +98,14 @@ if __name__ == "__main__":
         "Chunk a data on stdin into chunks of a given size, and invoke an action on each chunk."
     )
     parser.add_argument(
+        "--chunk-retry-limit",
+        type=int,
+        required=False,
+        default=5,
+        help=
+        """Maximum number of times to retry a chunk. If this is exceeded, the upload will abort"""
+    )
+    parser.add_argument(
         "--chunk-size",
         type=int,
         required=True,
@@ -91,7 +114,9 @@ if __name__ == "__main__":
         "--command",
         type=JSONList(),
         required=True,
-        help="""Path to binary to invoke""")
+        help=
+        """Path to binary to invoke and arguments, expressed as a JSON list of strings."""
+    )
     parser.add_argument(
         "--name",
         required=True,
